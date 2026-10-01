@@ -108,13 +108,39 @@ class CI_Data_Manager {
     }
     
     // ============================================
+    // تولید شماره درخواست یکتای سراسری
+    // ============================================
+    private function generate_unique_request_id() {
+        $used_ids = [];
+
+        // تمام فایل‌های ماهانه بررسی می‌شوند تا شماره در هیچ ماهی تکراری نباشد.
+        foreach ($this->get_available_months() as $month) {
+            $monthly_data = $this->load_monthly_data($month);
+            if (empty($monthly_data['requests']) || !is_array($monthly_data['requests'])) {
+                continue;
+            }
+            foreach ($monthly_data['requests'] as $request) {
+                if (isset($request['id'])) {
+                    $used_ids[(string) intval($request['id'])] = true;
+                }
+            }
+        }
+
+        do {
+            $request_id = wp_rand(1000, 999999);
+        } while (isset($used_ids[(string) $request_id]));
+
+        return $request_id;
+    }
+
+    // ============================================
     // مدیریت درخواست‌ها (با فیلدهای جدید)
     // ============================================
     public function create_request($user_id, $data) {
         $month = CI_CURRENT_MONTH;
         $monthly_data = $this->load_monthly_data($month);
         
-        $request_id = $monthly_data['next_id']++;
+        $request_id = $this->generate_unique_request_id();
         $extra_fee = isset($data['extra_fee']) ? (bool)$data['extra_fee'] : false;
         
         $request = [
