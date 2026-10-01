@@ -333,5 +333,3 @@ class CI_Zibal_Gateway {
         }
         exit;
     }
-}
-}
