@@ -46,15 +46,12 @@ class CI_Zibal_Gateway {
     
     $data = [
         'merchant' => $merchant,
-        'amount' => $amount_in_rial,  // ✅ ریال
+        'amount' => $amount_in_rial,
         'callbackUrl' => $callback_url,
         'orderId' => $request_id,
         'description' => 'صدور گواهی - شماره درخواست: ' . $request_id
     ];
     
-    // ============================================
-    // ✅ ارسال درخواست با timeout بیشتر
-    // ============================================
     $ch = curl_init('https://gateway.zibal.ir/v1/request');
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -72,9 +69,6 @@ class CI_Zibal_Gateway {
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $error = curl_error($ch);
     
-    // ============================================
-    // ✅ لاگ‌گیری خطاهای درگاه زیبال
-    // ============================================
     if (curl_errno($ch) || $http_code >= 500) {
         error_log('[Zibal Gateway Error] HTTP Code: ' . $http_code . ' | cURL Error: ' . $error . ' | Response: ' . $response);
         error_log('[Zibal Gateway Error] Request Data: ' . json_encode($data));
@@ -83,9 +77,6 @@ class CI_Zibal_Gateway {
     
     curl_close($ch);
     
-    // ============================================
-    // ✅ لاگ برای دیباگ
-    // ============================================
     error_log('[Zibal] Request Data: ' . json_encode($data));
     error_log('[Zibal] Response HTTP: ' . $http_code);
     error_log('[Zibal] Response Body: ' . $response);
@@ -117,9 +108,6 @@ class CI_Zibal_Gateway {
     }
 }
     
-    // ============================================
-    // دریافت لینک پرداخت
-    // ============================================
     private function get_payment_url($track_id) {
         $urls = [
             'https://gateway.zibal.ir/start/' . $track_id,
@@ -135,9 +123,6 @@ class CI_Zibal_Gateway {
         return $urls[0];
     }
     
-    // ============================================
-    // تأیید پرداخت
-    // ============================================
     public function verify_payment($track_id, $request_id) {
         $merchant = isset($this->settings['zibal_merchant']) && !empty($this->settings['zibal_merchant']) 
             ? $this->settings['zibal_merchant'] 
@@ -185,9 +170,6 @@ class CI_Zibal_Gateway {
         }
     }
     
-    // ============================================
-    // درخواست CURL
-    // ============================================
     private function curl_request($url, $data) {
         $payload = json_encode($data);
         
@@ -212,7 +194,6 @@ class CI_Zibal_Gateway {
         $error = curl_errno($ch);
         curl_close($ch);
         
-        // لاگ برای دیباگ
         error_log("Zibal CURL - URL: $url, HTTP: $http_code, Error: $error");
         error_log("Zibal Response: " . substr($response, 0, 200));
         
@@ -227,6 +208,7 @@ class CI_Zibal_Gateway {
         
         return $response;
     }
+
     public function handle_callback() {
         if (!isset($_GET['zibal_callback']) || !isset($_GET['trackId']) || !isset($_GET['success'])) {
             return;
@@ -248,9 +230,6 @@ class CI_Zibal_Gateway {
             exit;
         }
         
-        // کال‌بک زیبال ممکن است بیش از یک بار اجرا شود. اگر درخواست قبلاً
-        // پرداخت موفق داشته و به مرحله تأیید یا تأیید نهایی رسیده، هیچ کال‌بک
-        // تکراری نباید وضعیت آن را به عقب برگرداند.
         if (in_array($request['status'], ['pending', 'approved'], true)) {
             error_log('[Zibal] Duplicate callback ignored for request ' . $request_id . ' with status ' . $request['status']);
             wp_redirect(add_query_arg('status', 'payment_success', wc_get_account_endpoint_url('certificate-issuer')));
@@ -261,7 +240,6 @@ class CI_Zibal_Gateway {
             $verify_result = $this->verify_payment($track_id, $request_id);
             
             if ($verify_result['status'] == 'success') {
-                // فقط همین مرحله پرداخت موفق را ثبت می‌کنیم.
                 $this->data_manager->add_payment($request_id, [
                     'track_id' => $track_id,
                     'amount' => $verify_result['amount'],
@@ -270,8 +248,6 @@ class CI_Zibal_Gateway {
                     'status' => 'success'
                 ]);
                 
-                // فقط درخواست در انتظار پرداخت می‌تواند به pending برود.
-                // وضعیت‌های بالاتر هرگز با کال‌بک پرداخت پایین نمی‌آیند.
                 $current_request = $this->data_manager->get_request($request_id);
                 if ($current_request && $current_request['status'] === 'pending_payment') {
                     $this->data_manager->update_request($request_id, [
@@ -283,7 +259,6 @@ class CI_Zibal_Gateway {
                     ]);
                 }
                 
-                // ارسال پیامک ثبت‌نام (فعلاً بدون تغییر در متن پیامک)
                 if (class_exists('CI_SMS_Handler')) {
                     $sms = new CI_SMS_Handler();
                     $sms->send_registration_sms_full($request['phone'], $request_id);
@@ -291,8 +266,6 @@ class CI_Zibal_Gateway {
                 
                 wp_redirect(add_query_arg('status', 'payment_success', wc_get_account_endpoint_url('certificate-issuer')));
             } else {
-                // اگر پرداخت قبلاً موفق ثبت شده، شکست یک verify تکراری
-                // نباید آن را به pending_payment برگرداند.
                 $current_request = $this->data_manager->get_request($request_id);
                 $successful_payments = $this->data_manager->get_payments([
                     'request_id' => $request_id,
@@ -315,7 +288,6 @@ class CI_Zibal_Gateway {
                 wp_redirect(add_query_arg('status', 'payment_failed', wc_get_account_endpoint_url('certificate-issuer')));
             }
         } else {
-            // لغو شدن یک کال‌بک تکراری نباید پرداخت موفق قبلی را خراب کند.
             $current_request = $this->data_manager->get_request($request_id);
             $successful_payments = $this->data_manager->get_payments([
                 'request_id' => $request_id,
@@ -333,3 +305,4 @@ class CI_Zibal_Gateway {
         }
         exit;
     }
+}
