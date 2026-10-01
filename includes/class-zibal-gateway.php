@@ -228,75 +228,110 @@ class CI_Zibal_Gateway {
         return $response;
     }
     public function handle_callback() {
-    if (!isset($_GET['zibal_callback']) || !isset($_GET['trackId']) || !isset($_GET['success'])) {
-        return;
-    }
-    
-    $request_id = isset($_GET['request_id']) ? intval($_GET['request_id']) : 0;
-    $track_id = sanitize_text_field($_GET['trackId']);
-    $success = sanitize_text_field($_GET['success']);
-    
-    if (!$request_id) {
-        wp_redirect(wc_get_account_endpoint_url('certificate-issuer'));
-        exit;
-    }
-    
-    $request = $this->data_manager->get_request($request_id);
-    
-    if (!$request) {
-        wp_redirect(wc_get_account_endpoint_url('certificate-issuer'));
-        exit;
-    }
-    
-    if ($success == '1') {
-        $verify_result = $this->verify_payment($track_id, $request_id);
+        if (!isset($_GET['zibal_callback']) || !isset($_GET['trackId']) || !isset($_GET['success'])) {
+            return;
+        }
         
-        if ($verify_result['status'] == 'success') {
-            // ============================================
-            // ✅ 1. ثبت پرداخت در دیتابیس
-            // ============================================
-            $this->data_manager->add_payment($request_id, [
-                'track_id' => $track_id,
-                'amount' => $verify_result['amount'],
-                'card_number' => $verify_result['card_number'] ?? '',
-                'tracking_number' => $verify_result['tracking_number'] ?? '',
+        $request_id = isset($_GET['request_id']) ? intval($_GET['request_id']) : 0;
+        $track_id = sanitize_text_field($_GET['trackId']);
+        $success = sanitize_text_field($_GET['success']);
+        
+        if (!$request_id) {
+            wp_redirect(wc_get_account_endpoint_url('certificate-issuer'));
+            exit;
+        }
+        
+        $request = $this->data_manager->get_request($request_id);
+        
+        if (!$request) {
+            wp_redirect(wc_get_account_endpoint_url('certificate-issuer'));
+            exit;
+        }
+        
+        // کال‌بک زیبال ممکن است بیش از یک بار اجرا شود. اگر درخواست قبلاً
+        // پرداخت موفق داشته و به مرحله تأیید یا تأیید نهایی رسیده، هیچ کال‌بک
+        // تکراری نباید وضعیت آن را به عقب برگرداند.
+        if (in_array($request['status'], ['pending', 'approved'], true)) {
+            error_log('[Zibal] Duplicate callback ignored for request ' . $request_id . ' with status ' . $request['status']);
+            wp_redirect(add_query_arg('status', 'payment_success', wc_get_account_endpoint_url('certificate-issuer')));
+            exit;
+        }
+        
+        if ($success == '1') {
+            $verify_result = $this->verify_payment($track_id, $request_id);
+            
+            if ($verify_result['status'] == 'success') {
+                // فقط همین مرحله پرداخت موفق را ثبت می‌کنیم.
+                $this->data_manager->add_payment($request_id, [
+                    'track_id' => $track_id,
+                    'amount' => $verify_result['amount'],
+                    'card_number' => $verify_result['card_number'] ?? '',
+                    'tracking_number' => $verify_result['tracking_number'] ?? '',
+                    'status' => 'success'
+                ]);
+                
+                // فقط درخواست در انتظار پرداخت می‌تواند به pending برود.
+                // وضعیت‌های بالاتر هرگز با کال‌بک پرداخت پایین نمی‌آیند.
+                $current_request = $this->data_manager->get_request($request_id);
+                if ($current_request && $current_request['status'] === 'pending_payment') {
+                    $this->data_manager->update_request($request_id, [
+                        'status' => 'pending',
+                        'transaction_id' => $track_id,
+                        'payment_date' => current_time('mysql'),
+                        'card_number' => $verify_result['card_number'] ?? '',
+                        'tracking_number' => $verify_result['tracking_number'] ?? ''
+                    ]);
+                }
+                
+                // ارسال پیامک ثبت‌نام (فعلاً بدون تغییر در متن پیامک)
+                if (class_exists('CI_SMS_Handler')) {
+                    $sms = new CI_SMS_Handler();
+                    $sms->send_registration_sms_full($request['phone'], $request_id);
+                }
+                
+                wp_redirect(add_query_arg('status', 'payment_success', wc_get_account_endpoint_url('certificate-issuer')));
+            } else {
+                // اگر پرداخت قبلاً موفق ثبت شده، شکست یک verify تکراری
+                // نباید آن را به pending_payment برگرداند.
+                $current_request = $this->data_manager->get_request($request_id);
+                $successful_payments = $this->data_manager->get_payments([
+                    'request_id' => $request_id,
+                    'status' => 'success'
+                ]);
+                
+                if ($current_request && !empty($successful_payments)) {
+                    error_log('[Zibal] Failed duplicate verification ignored for already-paid request ' . $request_id);
+                    wp_redirect(add_query_arg('status', 'payment_success', wc_get_account_endpoint_url('certificate-issuer')));
+                    exit;
+                }
+                
+                if ($current_request && $current_request['status'] === 'pending_payment') {
+                    $this->data_manager->update_request($request_id, [
+                        'status' => 'pending_payment',
+                        'transaction_id' => $track_id
+                    ]);
+                }
+                
+                wp_redirect(add_query_arg('status', 'payment_failed', wc_get_account_endpoint_url('certificate-issuer')));
+            }
+        } else {
+            // لغو شدن یک کال‌بک تکراری نباید پرداخت موفق قبلی را خراب کند.
+            $current_request = $this->data_manager->get_request($request_id);
+            $successful_payments = $this->data_manager->get_payments([
+                'request_id' => $request_id,
                 'status' => 'success'
             ]);
             
-            // ============================================
-            // ✅ 2. آپدیت وضعیت درخواست به pending (در انتظار تایید)
-            // ============================================
-            $update_data = [
-                'status' => 'pending',
-                'transaction_id' => $track_id,
-                'payment_date' => current_time('mysql'),
-                'card_number' => $verify_result['card_number'] ?? '',
-                'tracking_number' => $verify_result['tracking_number'] ?? ''
-            ];
-            
-            $this->data_manager->update_request($request_id, $update_data);
-            
-            // ============================================
-            // ✅ 3. ارسال پیامک ثبت‌نام (نه تایید)
-            // ============================================
-            if (class_exists('CI_SMS_Handler')) {
-                $sms = new CI_SMS_Handler();
-                // فقط پیامک ثبت‌نام به کاربر + مدیر
-                $sms->send_registration_sms_full($request['phone'], $request_id);
+            if ($current_request && !empty($successful_payments)) {
+                error_log('[Zibal] Cancel callback ignored for already-paid request ' . $request_id);
+                wp_redirect(add_query_arg('status', 'payment_success', wc_get_account_endpoint_url('certificate-issuer')));
+                exit;
             }
             
-            wp_redirect(add_query_arg('status', 'payment_success', wc_get_account_endpoint_url('certificate-issuer')));
-        } else {
-            $this->data_manager->update_request($request_id, [
-                'status' => 'pending_payment',
-                'transaction_id' => $track_id
-            ]);
-            wp_redirect(add_query_arg('status', 'payment_failed', wc_get_account_endpoint_url('certificate-issuer')));
+            $this->data_manager->update_request($request_id, ['status' => 'cancelled']);
+            wp_redirect(add_query_arg('status', 'payment_cancelled', wc_get_account_endpoint_url('certificate-issuer')));
         }
-    } else {
-        $this->data_manager->update_request($request_id, ['status' => 'cancelled']);
-        wp_redirect(add_query_arg('status', 'payment_cancelled', wc_get_account_endpoint_url('certificate-issuer')));
+        exit;
     }
-    exit;
 }
 }
