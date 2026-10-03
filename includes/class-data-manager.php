@@ -114,21 +114,31 @@ class CI_Data_Manager {
         $used_ids = [];
 
         // تمام فایل‌های ماهانه بررسی می‌شوند تا شماره در هیچ ماهی تکراری نباشد.
+        // شماره‌گذاری از ۱ شروع می‌شود و همیشه کوچک‌ترین شماره آزاد انتخاب می‌شود.
         foreach ($this->get_available_months() as $month) {
             $monthly_data = $this->load_monthly_data($month);
+
             if (empty($monthly_data['requests']) || !is_array($monthly_data['requests'])) {
                 continue;
             }
+
             foreach ($monthly_data['requests'] as $request) {
-                if (isset($request['id'])) {
-                    $used_ids[(string) intval($request['id'])] = true;
+                if (!isset($request['id']) || $request['id'] === '') {
+                    continue;
+                }
+
+                $id = intval($request['id']);
+                if ($id > 0) {
+                    $used_ids[$id] = true;
                 }
             }
         }
 
-        do {
-            $request_id = wp_rand(1000, 999999);
-        } while (isset($used_ids[(string) $request_id]));
+        // اولین شماره آزاد از ۱ به بالا.
+        $request_id = 1;
+        while (isset($used_ids[$request_id])) {
+            $request_id++;
+        }
 
         return $request_id;
     }
